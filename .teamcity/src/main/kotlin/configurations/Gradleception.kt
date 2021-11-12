@@ -31,30 +31,85 @@ class Gradleception(model: CIBuildModel, stage: Stage) : BaseGradleBuildType(sta
     val buildScanTagForType = buildScanTag("Gradleception")
     val defaultParameters = (buildToolGradleParameters() + listOf(buildScanTagForType) + "-Porg.gradle.java.installations.auto-download=false").joinToString(separator = " ")
 
-    applyDefaults(model, this, ":distributions-full:install", notQuick = true, extraParameters = "-Pgradle_installPath=dogfood-first -PignoreIncomingBuildReceipt=true -PbuildTimestamp=$magicTimestamp $buildScanTagForType", extraSteps = {
-        script {
-            name = "CALCULATE_DISTRIBUTION_MD5"
-            scriptContent = """
+    steps.calculateMd5AndSetEnvStep("CALCULATE_FIRST_DISTRIBUTION_MD5", "%teamcity.build.checkoutDir%", gradleceptionFilePatterns)
+
+    applyDefaults(
+        model,
+        this,
+        ":distributions-full:install",
+        notQuick = true,
+        extraParameters = "-Pgradle_installPath=dogfood-first -PignoreIncomingBuildReceipt=true -PbuildTimestamp=$magicTimestamp $buildScanTagForType",
+        extraSteps = {
+            calculateMd5AndSetEnvStep("CALCULATE_SECOND_DISTRIBUTION_MD5", "%teamcity.build.checkoutDir%/dogfood-first")
+
+            localGradle {
+                name = "BUILD_WITH_BUILT_GRADLE"
+                tasks = "clean :distributions-full:install"
+                gradleHome = "%teamcity.build.checkoutDir%/dogfood-first"
+                gradleParams = "-Pgradle_installPath=dogfood-second -PignoreIncomingBuildReceipt=true -PbuildTimestamp=$magicTimestamp $defaultParameters"
+            }
+            localGradle {
+                name = "QUICKCHECK_WITH_GRADLE_BUILT_BY_GRADLE"
+                tasks = "clean sanityCheck test"
+                gradleHome = "%teamcity.build.checkoutDir%/dogfood-second"
+                gradleParams = defaultParameters
+            }
+        })
+})
+
+// Only changes matching these patterns cause Gradleception build to rerun.
+val gradleceptionFilePatterns = listOf(
+    "./build-logic/*.kts",
+    "./build-logic/*/*.kts",
+    "./build-logic/*/src/main/**",
+
+    "./build-logic-commons/*.kts",
+    "./build-logic-commons/*/*.kts",
+    "./build-logic-commons/*/src/main/**",
+
+    "./build-logic-settings/*.kts",
+    "./build-logic-settings/*/*.kts",
+    "./build-logic-settings/*/src/main/**",
+
+    "./subprojects/*/*.kts",
+    "./subprojects/*/*.gradle",
+    "./subprojects/*/src/main/**",
+
+    "./*.kts",
+    "./gradle/**"
+)
+
+// translate Ant pattern to find command's `-regex`
+// . -> \.
+// * -> [^/]* because single asterisk should not match /
+// ** -> .*
+fun String.singlePatternToFindCommandRegex(): String {
+    val regex = replace("**", "DOUBLE_ASTERISK")
+        .replace(".", "SINGLE_DOT")
+        .replace("*", "[^/]*")
+        .replace("SINGLE_DOT", "\\.")
+        .replace("DOUBLE_ASTERISK", ".*")
+    return "-regex '$regex'"
+}
+
+fun gradleceptionFindCommand(dir: String, patterns: List<String>): String {
+    if (patterns.isEmpty()) {
+        return "find $dir -type f"
+    } else {
+        return "find $dir -type f \\( ${patterns.joinToString(" -o ") { it.singlePatternToFindCommandRegex() }} \\)"
+    }
+}
+
+fun BuildSteps.calculateMd5AndSetEnvStep(stepName: String, dir: String, patterns: List<String> = emptyList()) {
+    script {
+        name = stepName
+        scriptContent = """
                 set -x
-                MD5=`find %teamcity.build.checkoutDir%/dogfood-first -type f | sort | xargs md5sum | md5sum | awk '{ print ${'$'}1 }'`
+                MD5=`${gradleceptionFindCommand(dir, patterns)} | sort | xargs md5sum | md5sum | awk '{ print ${'$'}1 }'`
                 echo "##teamcity[setParameter name='env.ORG_GRADLE_PROJECT_versionQualifier' value='gradleception-${'$'}MD5']"
             """.trimIndent()
-        }
-
-        localGradle {
-            name = "BUILD_WITH_BUILT_GRADLE"
-            tasks = "clean :distributions-full:install"
-            gradleHome = "%teamcity.build.checkoutDir%/dogfood-first"
-            gradleParams = "-Pgradle_installPath=dogfood-second -PignoreIncomingBuildReceipt=true -PbuildTimestamp=$magicTimestamp $defaultParameters"
-        }
-        localGradle {
-            name = "QUICKCHECK_WITH_GRADLE_BUILT_BY_GRADLE"
-            tasks = "clean sanityCheck test"
-            gradleHome = "%teamcity.build.checkoutDir%/dogfood-second"
-            gradleParams = defaultParameters
-        }
-    })
-})
+    }
+}
 
 fun BuildSteps.localGradle(init: GradleBuildStep.() -> Unit): GradleBuildStep =
     customGradle(init) {
