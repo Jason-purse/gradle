@@ -105,7 +105,8 @@ fun BuildSteps.calculateMd5AndSetEnvStep(stepName: String, dir: String, patterns
         name = stepName
         scriptContent = """
                 set -x
-                MD5=`${gradleceptionFindCommand(dir, patterns)} | sort | xargs md5sum | md5sum | awk '{ print ${'$'}1 }'`
+                FILES=`${gradleceptionFindCommand(dir, patterns)}`
+                MD5=`echo ${'$'}FILES | sort | xargs md5sum | md5sum | awk '{ print ${'$'}1 }'`
                 echo "##teamcity[setParameter name='env.ORG_GRADLE_PROJECT_versionQualifier' value='gradleception-${'$'}MD5']"
             """.trimIndent()
     }
